@@ -1,0 +1,350 @@
+# Space Authorization Platform Design
+
+## Summary
+
+This document captures the approved design for a new authorization system to support the website shown in the permissions screenshots. The conclusion is not to extend the current `rbac7` service. The existing service is optimized for fixed roles, `system/resource` scopes, allow-only policies, and a small set of domain entities. The new product requires a different core model:
+
+- Space-level built-in and custom roles
+- Permission matrix management UI
+- Role assignment to both users and departments
+- Channel-level `inherit / allow / deny` overrides
+- Product-facing audit log for management and content activity
+
+The recommended direction is a new system: `Space Authorization Platform`.
+
+## Why The Current Project Is Not A Good Fit
+
+The current project has the following structural constraints:
+
+- Fixed role sets in embedded JSON
+- `system` and `resource` as the primary scopes
+- No first-class `deny`
+- No custom role model
+- No subject abstraction for departments
+- No channel override layer
+- Audit history focused on role changes instead of generalized activity
+
+Adapting the existing code would require replacing the data model, repository contracts, policy engine assumptions, and API shape. That is a redesign, not an extension.
+
+## Recommended Architecture
+
+The new system should combine:
+
+- RBAC for space-level authorization
+- Override ACL for channel-level exceptions
+- Centralized decision engine for effective permission evaluation
+- Audit event pipeline for permissions and content activity
+
+The architecture has these logical modules:
+
+1. `catalog`
+   Stores the permission catalog and built-in role templates.
+2. `membership`
+   Resolves users, departments, and department membership.
+3. `roles`
+   Manages roles, role permissions, and role bindings.
+4. `overrides`
+   Stores channel-level permission overrides.
+5. `authz`
+   Computes effective permissions for runtime checks.
+6. `audit`
+   Records and queries management and content events.
+
+## Core Concepts
+
+### Space
+
+The top-level authorization boundary. All roles, role bindings, channel overrides, and audit logs are scoped to a `space_id`.
+
+### Subject
+
+A subject is an entity that can receive a role assignment. Initial supported types:
+
+- `user`
+- `department`
+
+Users receive permissions from:
+
+- Direct role bindings
+- Department role bindings
+
+### Role
+
+Roles are data, not code. Each role belongs to one space and is either:
+
+- `system` role: built-in, optionally locked
+- `custom` role: user-defined
+
+Examples:
+
+- Built-in: `owner`, `admin`, `member`, `guest`
+- Custom: `contributor`, `external_reviewer`
+
+### Permission
+
+A permission is a catalog item such as:
+
+- `space.settings.edit`
+- `space.members.manage`
+- `space.delete`
+- `channels.create`
+- `channel.messages.send`
+- `files.download`
+- `files.restricted.read`
+- `documents.comment`
+
+Each permission must include metadata for the management UI:
+
+- Key
+- Category
+- Display name
+- Description
+- Resource scope
+
+### Override
+
+Channel-level overrides apply to a role-permission pair and use a tri-state effect:
+
+- `inherit`
+- `allow`
+- `deny`
+
+Overrides apply only to channel-scoped permissions.
+
+## Data Model
+
+The recommended persistence model is:
+
+### `spaces`
+
+- `_id`
+- `name`
+- `slug`
+- `status`
+- `created_at`
+- `updated_at`
+
+### `subjects`
+
+- `_id`
+- `type` (`user` | `department`)
+- `display_name`
+- `external_ref`
+- `status`
+
+### `memberships`
+
+Tracks user participation and department membership.
+
+- `_id`
+- `space_id`
+- `user_id`
+- `department_ids`
+- `joined_at`
+- `status`
+
+### `roles`
+
+- `_id`
+- `space_id`
+- `name`
+- `kind` (`system` | `custom`)
+- `locked`
+- `priority`
+- `description`
+- `created_by`
+- `created_at`
+- `updated_at`
+
+### `permissions`
+
+- `_id`
+- `permission_key`
+- `category`
+- `resource_scope`
+- `display_name`
+- `description`
+- `sort_order`
+
+### `role_permissions`
+
+Base space-level grants. Only positive grants are stored here.
+
+- `_id`
+- `space_id`
+- `role_id`
+- `permission_key`
+
+### `role_bindings`
+
+- `_id`
+- `space_id`
+- `role_id`
+- `subject_type`
+- `subject_id`
+- `assigned_by`
+- `created_at`
+
+### `channels`
+
+- `_id`
+- `space_id`
+- `name`
+- `kind`
+- `status`
+
+### `channel_permission_overrides`
+
+- `_id`
+- `space_id`
+- `channel_id`
+- `role_id`
+- `permission_key`
+- `effect` (`inherit` | `allow` | `deny`)
+- `updated_by`
+- `updated_at`
+
+### `audit_events`
+
+- `_id`
+- `space_id`
+- `category`
+- `event_type`
+- `actor_subject_id`
+- `target_subject_id`
+- `resource_type`
+- `resource_id`
+- `message`
+- `metadata`
+- `created_at`
+
+## Permission Evaluation Rules
+
+### Space-Level Evaluation
+
+1. Resolve all direct role bindings for the user.
+2. Resolve all departments the user belongs to.
+3. Resolve department role bindings.
+4. Union all granted permissions from the resulting role set.
+
+### Channel-Level Evaluation
+
+For a channel-scoped permission:
+
+1. Compute base permission from space roles.
+2. Load overrides for the caller's effective roles on the target channel.
+3. Apply override precedence:
+   - Any `deny` wins.
+   - Else any `allow` wins.
+   - Else result is inherited from the base space permission.
+
+### Special Rules
+
+- `owner` is locked and cannot be removed from critical permissions.
+- `owner` cannot be overridden by channel-level deny.
+- The system must enforce at least one owner per space.
+
+## API Surface
+
+The new API should be designed around management workflows and runtime authorization checks.
+
+### Members
+
+- `GET /api/spaces/:spaceId/members`
+- `POST /api/spaces/:spaceId/members/invite`
+- `POST /api/spaces/:spaceId/role-bindings`
+- `DELETE /api/spaces/:spaceId/role-bindings/:bindingId`
+- `GET /api/spaces/:spaceId/departments`
+
+### Roles And Permissions
+
+- `GET /api/spaces/:spaceId/roles`
+- `POST /api/spaces/:spaceId/roles`
+- `PATCH /api/spaces/:spaceId/roles/:roleId`
+- `DELETE /api/spaces/:spaceId/roles/:roleId`
+- `GET /api/spaces/:spaceId/permissions`
+- `PUT /api/spaces/:spaceId/roles/:roleId/permissions`
+
+### Channels
+
+- `GET /api/spaces/:spaceId/channels`
+- `GET /api/spaces/:spaceId/channels/:channelId/overrides`
+- `PUT /api/spaces/:spaceId/channels/:channelId/overrides`
+- `POST /api/spaces/:spaceId/channels/:channelId/copy-overrides`
+
+### Authorization
+
+- `POST /api/authz/check`
+- `POST /api/authz/check-batch`
+- `GET /api/authz/me`
+
+### Audit Log
+
+- `GET /api/spaces/:spaceId/audit-logs`
+- `GET /api/spaces/:spaceId/audit-logs/export`
+
+## Admin UI
+
+The management interface should provide five tabs aligned with the screenshots:
+
+1. `Members`
+   User and department membership, direct and inherited role bindings.
+2. `Roles`
+   Built-in and custom roles, with summary cards and capability highlights.
+3. `Permissions`
+   Space-level permission matrix for each role.
+4. `Channels`
+   Channel-level override matrix using `inherit / allow / deny`.
+5. `Audit Log`
+   Searchable event history with category filters and export.
+
+## Technology Recommendation
+
+### Backend
+
+- Go
+- Echo
+- MongoDB
+
+This keeps the implementation stack familiar while allowing a fresh model not constrained by the current service's policy format.
+
+### Frontend
+
+A dedicated admin UI, either:
+
+- Embedded in the new website's admin area, or
+- Built as a separate admin application
+
+The frontend should use view models tailored for matrix editing, not raw persistence objects.
+
+## Delivery Strategy
+
+Recommended rollout phases:
+
+1. Base space roles and runtime authorization checks
+2. Custom roles and permission matrix UI
+3. Channel overrides
+4. Audit log and export
+
+This sequence isolates the highest-risk evaluator work until the base RBAC layer is stable.
+
+## Testing Strategy
+
+Tests must focus on the evaluator and management workflows:
+
+- Unit tests for permission resolution and override precedence
+- Repository tests for bindings, overrides, and audit filters
+- API tests for management endpoints and runtime authz endpoints
+- UI integration tests for matrix editing and override behavior
+
+## Final Decision
+
+Build a new authorization platform instead of modifying `rbac7`.
+
+This design directly supports:
+
+- Custom roles
+- Department-based role inheritance
+- Channel-level tri-state overrides
+- Admin-facing permission matrix
+- Generalized audit logging
