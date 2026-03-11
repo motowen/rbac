@@ -1,0 +1,569 @@
+# Space Authorization Platform Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Build a new authorization platform for the website's space, channel, role, and audit management requirements without reusing the current `rbac7` domain model.
+
+**Architecture:** Create a greenfield service that separates catalog, membership, roles, overrides, authz evaluation, and audit logging. Use space-level RBAC for base permissions and channel-level override ACL for `inherit / allow / deny`.
+
+**Tech Stack:** Go, Echo, MongoDB, frontend admin UI, automated tests
+
+---
+
+### Task 1: Scaffold A New Service Workspace
+
+**Files:**
+- Create: `docs/plans/2026-03-11-space-authorization-design.md`
+- Create: `docs/plans/2026-03-11-space-authorization-platform.md`
+- Create: `space-auth/README.md`
+- Create: `space-auth/go.mod`
+- Create: `space-auth/cmd/server/main.go`
+
+**Step 1: Write the failing test**
+
+Create a placeholder smoke test:
+
+```go
+package main
+
+import "testing"
+
+func TestServerPackageBuilds(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./...`
+Expected: FAIL because `space-auth` module and files do not exist yet.
+
+**Step 3: Write minimal implementation**
+
+Create the `space-auth` module with:
+
+- `go.mod`
+- `cmd/server/main.go`
+- `README.md` describing the service purpose
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./...`
+Expected: PASS for the scaffold test.
+
+**Step 5: Commit**
+
+```bash
+git add docs/plans/2026-03-11-space-authorization-design.md docs/plans/2026-03-11-space-authorization-platform.md space-auth
+git commit -m "feat: scaffold space authorization service"
+```
+
+### Task 2: Define Domain Types And Persistence Contracts
+
+**Files:**
+- Create: `space-auth/internal/domain/types.go`
+- Create: `space-auth/internal/domain/permissions.go`
+- Create: `space-auth/internal/repository/contracts.go`
+- Test: `space-auth/internal/domain/types_test.go`
+
+**Step 1: Write the failing test**
+
+Add tests covering constants and core structs:
+
+```go
+func TestOverrideEffectsAreStable(t *testing.T) {
+    if EffectDeny == "" || EffectAllow == "" || EffectInherit == "" {
+        t.Fatal("override effects must be defined")
+    }
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/internal/domain/... -v`
+Expected: FAIL because the types and constants do not exist.
+
+**Step 3: Write minimal implementation**
+
+Define:
+
+- subject types
+- role kinds
+- override effects
+- space, role, permission, role binding, channel override, audit event structs
+- repository interfaces for roles, bindings, overrides, memberships, and audit
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/internal/domain/... -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/domain space-auth/internal/repository
+git commit -m "feat: add space auth domain contracts"
+```
+
+### Task 3: Implement Permission Catalog And Built-In Roles
+
+**Files:**
+- Create: `space-auth/internal/catalog/catalog.go`
+- Create: `space-auth/internal/catalog/default_permissions.go`
+- Create: `space-auth/internal/catalog/default_roles.go`
+- Test: `space-auth/internal/catalog/catalog_test.go`
+
+**Step 1: Write the failing test**
+
+Add tests for expected built-in data:
+
+```go
+func TestCatalogIncludesLockedOwnerRole(t *testing.T) {
+    roles := DefaultRoles()
+    if !roles["owner"].Locked {
+        t.Fatal("owner role must be locked")
+    }
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/internal/catalog -v`
+Expected: FAIL because catalog functions do not exist.
+
+**Step 3: Write minimal implementation**
+
+Implement default permission catalog and built-in roles:
+
+- `owner`
+- `admin`
+- `member`
+- `guest`
+
+Include category metadata for UI grouping.
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/internal/catalog -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/catalog
+git commit -m "feat: add default role and permission catalog"
+```
+
+### Task 4: Build The Effective Permission Evaluator
+
+**Files:**
+- Create: `space-auth/internal/authz/evaluator.go`
+- Test: `space-auth/internal/authz/evaluator_test.go`
+
+**Step 1: Write the failing test**
+
+Add evaluator tests for the core rules:
+
+```go
+func TestChannelDenyOverridesSpaceAllow(t *testing.T) {}
+func TestChannelAllowOverridesInheritedFalse(t *testing.T) {}
+func TestOwnerCannotBeDeniedByChannelOverride(t *testing.T) {}
+func TestDepartmentRoleContributesToEffectivePermissions(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/internal/authz -v`
+Expected: FAIL because the evaluator does not exist.
+
+**Step 3: Write minimal implementation**
+
+Implement evaluation flow:
+
+1. Collect direct user roles
+2. Collect department-derived roles
+3. Union base permissions
+4. Apply channel override precedence
+5. Enforce owner short-circuit rules
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/internal/authz -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/authz
+git commit -m "feat: add effective permission evaluator"
+```
+
+### Task 5: Add Mongo Repository Implementations
+
+**Files:**
+- Create: `space-auth/internal/repository/mongo/roles.go`
+- Create: `space-auth/internal/repository/mongo/bindings.go`
+- Create: `space-auth/internal/repository/mongo/memberships.go`
+- Create: `space-auth/internal/repository/mongo/overrides.go`
+- Create: `space-auth/internal/repository/mongo/audit.go`
+- Test: `space-auth/internal/repository/mongo/*_test.go`
+
+**Step 1: Write the failing test**
+
+Write repository tests for:
+
+- storing a custom role
+- binding a role to a department
+- saving a channel override with `deny`
+- querying audit events by category
+
+```go
+func TestSaveChannelOverride(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/internal/repository/mongo/... -v`
+Expected: FAIL because repository implementations do not exist.
+
+**Step 3: Write minimal implementation**
+
+Implement Mongo-backed repositories and indexes for:
+
+- roles
+- role permissions
+- role bindings
+- memberships
+- channel overrides
+- audit events
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/internal/repository/mongo/... -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/repository/mongo
+git commit -m "feat: add mongo repositories for space auth"
+```
+
+### Task 6: Expose Management APIs
+
+**Files:**
+- Create: `space-auth/internal/http/handlers/members.go`
+- Create: `space-auth/internal/http/handlers/roles.go`
+- Create: `space-auth/internal/http/handlers/channels.go`
+- Create: `space-auth/internal/http/handlers/audit.go`
+- Create: `space-auth/internal/http/router/router.go`
+- Test: `space-auth/tests/management_api_test.go`
+
+**Step 1: Write the failing test**
+
+Add API tests for:
+
+- listing roles
+- creating a custom role
+- updating role permissions
+- saving channel overrides
+
+```go
+func TestCreateCustomRoleReturns201(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/tests -run TestCreateCustomRoleReturns201 -v`
+Expected: FAIL because handlers and routes do not exist.
+
+**Step 3: Write minimal implementation**
+
+Implement REST endpoints for:
+
+- members
+- role bindings
+- roles
+- permissions
+- channels
+- audit logs
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/tests -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/http space-auth/tests
+git commit -m "feat: add management APIs for space auth"
+```
+
+### Task 7: Expose Runtime Authorization APIs
+
+**Files:**
+- Create: `space-auth/internal/http/handlers/authz.go`
+- Test: `space-auth/tests/authz_api_test.go`
+
+**Step 1: Write the failing test**
+
+Add tests for:
+
+- `POST /api/authz/check`
+- `POST /api/authz/check-batch`
+- `GET /api/authz/me`
+
+```go
+func TestCheckPermissionReturnsAllowed(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/tests -run TestCheckPermissionReturnsAllowed -v`
+Expected: FAIL because authz handlers do not exist.
+
+**Step 3: Write minimal implementation**
+
+Implement runtime authorization handlers backed by the evaluator.
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/tests -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/internal/http/handlers/authz.go space-auth/tests/authz_api_test.go
+git commit -m "feat: add runtime authz endpoints"
+```
+
+### Task 8: Build The Admin UI Shell
+
+**Files:**
+- Create: `space-auth-ui/README.md`
+- Create: `space-auth-ui/src/pages/permissions.tsx`
+- Create: `space-auth-ui/src/components/members-tab.tsx`
+- Create: `space-auth-ui/src/components/roles-tab.tsx`
+- Create: `space-auth-ui/src/components/permissions-tab.tsx`
+- Create: `space-auth-ui/src/components/channels-tab.tsx`
+- Create: `space-auth-ui/src/components/audit-tab.tsx`
+- Test: `space-auth-ui/src/pages/permissions.test.tsx`
+
+**Step 1: Write the failing test**
+
+Add a UI integration test asserting the five-tab layout exists.
+
+```tsx
+it("renders the permissions admin tabs", () => {
+  expect(screen.getByText("Members")).toBeInTheDocument()
+  expect(screen.getByText("Roles")).toBeInTheDocument()
+  expect(screen.getByText("Permissions")).toBeInTheDocument()
+  expect(screen.getByText("Channels")).toBeInTheDocument()
+  expect(screen.getByText("Audit Log")).toBeInTheDocument()
+})
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `npm test -- permissions.test.tsx`
+Expected: FAIL because the UI files do not exist.
+
+**Step 3: Write minimal implementation**
+
+Create the admin UI shell with:
+
+- tab navigation
+- role cards
+- permission matrix placeholder
+- channel override matrix placeholder
+- audit list placeholder
+
+**Step 4: Run test to verify it passes**
+
+Run: `npm test -- permissions.test.tsx`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth-ui
+git commit -m "feat: add space auth admin UI shell"
+```
+
+### Task 9: Add Matrix Editing And Override Flows
+
+**Files:**
+- Modify: `space-auth-ui/src/components/permissions-tab.tsx`
+- Modify: `space-auth-ui/src/components/channels-tab.tsx`
+- Create: `space-auth-ui/src/lib/api.ts`
+- Test: `space-auth-ui/src/components/permissions-tab.test.tsx`
+- Test: `space-auth-ui/src/components/channels-tab.test.tsx`
+
+**Step 1: Write the failing test**
+
+Add tests for:
+
+- toggling a role permission
+- switching a channel override through `inherit -> allow -> deny`
+- saving updates to the backend
+
+```tsx
+it("cycles override state", async () => {})
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `npm test -- permissions-tab.test.tsx channels-tab.test.tsx`
+Expected: FAIL because matrix interactions are not implemented.
+
+**Step 3: Write minimal implementation**
+
+Implement:
+
+- permission matrix editing
+- channel override editing
+- save actions
+- loading and error states
+
+**Step 4: Run test to verify it passes**
+
+Run: `npm test -- permissions-tab.test.tsx channels-tab.test.tsx`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth-ui/src/components space-auth-ui/src/lib/api.ts
+git commit -m "feat: add permission and override matrix flows"
+```
+
+### Task 10: Add Audit Logging Integration
+
+**Files:**
+- Modify: `space-auth/internal/http/handlers/*.go`
+- Modify: `space-auth/internal/repository/mongo/audit.go`
+- Modify: `space-auth-ui/src/components/audit-tab.tsx`
+- Test: `space-auth/tests/audit_api_test.go`
+- Test: `space-auth-ui/src/components/audit-tab.test.tsx`
+
+**Step 1: Write the failing test**
+
+Add tests verifying:
+
+- management actions create audit events
+- filtered audit queries return matching events
+- audit tab renders grouped entries
+
+```go
+func TestCreateRoleWritesAuditEvent(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/tests -run TestCreateRoleWritesAuditEvent -v`
+Expected: FAIL because audit emission is incomplete.
+
+**Step 3: Write minimal implementation**
+
+Record audit events for:
+
+- role create/update/delete
+- role binding create/delete
+- channel override updates
+- invitation and membership changes
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/tests -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth space-auth-ui
+git commit -m "feat: add audit logging integration"
+```
+
+### Task 11: Verify End-To-End Behavior
+
+**Files:**
+- Modify: `space-auth/tests/management_api_test.go`
+- Modify: `space-auth/tests/authz_api_test.go`
+- Modify: `space-auth-ui/src/pages/permissions.test.tsx`
+
+**Step 1: Write the failing test**
+
+Add end-to-end style checks for this scenario:
+
+1. create custom role
+2. grant document read
+3. bind role to department
+4. deny send message in one channel
+5. verify effective permission result
+
+```go
+func TestDepartmentRoleWithChannelDeny(t *testing.T) {}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `go test ./space-auth/tests -run TestDepartmentRoleWithChannelDeny -v`
+Expected: FAIL until all layers cooperate correctly.
+
+**Step 3: Write minimal implementation**
+
+Fix any evaluator, API, or persistence gaps revealed by the scenario test.
+
+**Step 4: Run test to verify it passes**
+
+Run: `go test ./space-auth/tests -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/tests space-auth-ui/src
+git commit -m "test: verify department and channel override behavior"
+```
+
+### Task 12: Document Operations And Deployment
+
+**Files:**
+- Create: `space-auth/docs/api.md`
+- Create: `space-auth/docs/data-model.md`
+- Create: `space-auth/docs/deployment.md`
+
+**Step 1: Write the failing test**
+
+Create a doc checklist in the README stating deployment docs must exist.
+
+```md
+- [ ] API documented
+- [ ] Data model documented
+- [ ] Deployment documented
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `rg "API documented|Data model documented|Deployment documented" space-auth/docs`
+Expected: FAIL because the docs do not exist yet.
+
+**Step 3: Write minimal implementation**
+
+Add operational documentation for:
+
+- API contracts
+- Mongo collections and indexes
+- local development and deployment
+
+**Step 4: Run test to verify it passes**
+
+Run: `rg "API documented|Data model documented|Deployment documented" space-auth/docs`
+Expected: PASS or matching docs created and referenced.
+
+**Step 5: Commit**
+
+```bash
+git add space-auth/docs space-auth/README.md
+git commit -m "docs: add space auth operational documentation"
+```
