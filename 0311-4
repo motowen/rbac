@@ -1,0 +1,482 @@
+Space Authorization Platform 設計
+摘要
+
+本文件整理了已核准的新授權系統設計，用來支援權限截圖中所展示的網站。結論是不擴充目前的 rbac7 服務。現有服務是為固定角色、system/resource 範圍、僅允許（allow-only）策略，以及少量領域實體而最佳化。新產品需要不同的核心模型：
+
+Space 層級的內建角色與自訂角色
+
+權限矩陣管理 UI
+
+可將角色指派給使用者與部門
+
+Channel 層級的 inherit / allow / deny 覆寫
+
+面向產品的稽核日誌，涵蓋管理與內容活動
+
+建議方向是建立一個新系統：Space Authorization Platform。
+
+為什麼目前專案不適合
+
+目前專案有以下結構性限制：
+
+角色集合固定，寫死在內嵌 JSON 中
+
+以 system 與 resource 作為主要 scope
+
+沒有一級公民的 deny
+
+沒有自訂角色模型
+
+沒有針對部門的 subject 抽象
+
+沒有 channel 覆寫層
+
+稽核歷史著重於角色變更，而非通用活動紀錄
+
+若要調整現有程式碼來符合需求，將必須替換資料模型、repository contract、policy engine 假設，以及 API 形狀。這已經不是擴充，而是重新設計。
+
+建議架構
+
+新系統應該結合以下幾個部分：
+
+以 RBAC 處理 space 層級授權
+
+以 Override ACL 處理 channel 層級例外
+
+以集中式 decision engine 計算實際生效的權限
+
+以 audit event pipeline 記錄權限與內容活動
+
+此架構包含以下邏輯模組：
+
+catalog
+儲存權限目錄與內建角色範本。
+
+membership
+解析使用者、部門，以及部門成員關係。
+
+roles
+管理角色、角色權限與角色綁定。
+
+overrides
+儲存 channel 層級的權限覆寫。
+
+authz
+計算執行期檢查所需的有效權限。
+
+audit
+記錄並查詢管理與內容事件。
+
+核心概念
+Space
+
+最高層級的授權邊界。所有角色、角色綁定、channel 覆寫與稽核日誌都以 space_id 為範圍。
+
+Subject
+
+Subject 是可被指派角色的實體。初始支援的類型如下：
+
+user
+
+department
+
+使用者可從以下來源取得權限：
+
+直接角色綁定
+
+部門角色綁定
+
+Role
+
+角色是資料，不是程式碼。每個角色都屬於某個 space，且分為：
+
+system 角色：內建角色，可選擇是否鎖定
+
+custom 角色：使用者自訂角色
+
+範例：
+
+內建：owner、admin、member、guest
+
+自訂：contributor、external_reviewer
+
+Permission
+
+權限是權限目錄中的項目，例如：
+
+space.settings.edit
+
+space.members.manage
+
+space.delete
+
+channels.create
+
+channel.messages.send
+
+files.download
+
+files.restricted.read
+
+documents.comment
+
+每個權限都必須包含供管理 UI 使用的中繼資料：
+
+Key
+
+Category
+
+Display name
+
+Description
+
+Resource scope
+
+Override
+
+Channel 層級的覆寫會套用在「角色－權限」配對上，並採用三態效果：
+
+inherit
+
+allow
+
+deny
+
+覆寫僅適用於 channel scope 的權限。
+
+資料模型
+
+建議的持久化模型如下：
+
+spaces
+
+_id
+
+name
+
+slug
+
+status
+
+created_at
+
+updated_at
+
+subjects
+
+_id
+
+type（user | department）
+
+display_name
+
+external_ref
+
+status
+
+memberships
+
+追蹤使用者參與情況與部門成員關係。
+
+_id
+
+space_id
+
+user_id
+
+department_ids
+
+joined_at
+
+status
+
+roles
+
+_id
+
+space_id
+
+name
+
+kind（system | custom）
+
+locked
+
+priority
+
+description
+
+created_by
+
+created_at
+
+updated_at
+
+permissions
+
+_id
+
+permission_key
+
+category
+
+resource_scope
+
+display_name
+
+description
+
+sort_order
+
+role_permissions
+
+基礎的 space 層級授權。此處只儲存正向授權（positive grants）。
+
+_id
+
+space_id
+
+role_id
+
+permission_key
+
+role_bindings
+
+_id
+
+space_id
+
+role_id
+
+subject_type
+
+subject_id
+
+assigned_by
+
+created_at
+
+channels
+
+_id
+
+space_id
+
+name
+
+kind
+
+status
+
+channel_permission_overrides
+
+_id
+
+space_id
+
+channel_id
+
+role_id
+
+permission_key
+
+effect（inherit | allow | deny）
+
+updated_by
+
+updated_at
+
+audit_events
+
+_id
+
+space_id
+
+category
+
+event_type
+
+actor_subject_id
+
+target_subject_id
+
+resource_type
+
+resource_id
+
+message
+
+metadata
+
+created_at
+
+權限評估規則
+Space 層級評估
+
+解析使用者所有直接角色綁定。
+
+解析該使用者所屬的所有部門。
+
+解析部門角色綁定。
+
+將最終角色集合中的所有授權權限做聯集。
+
+Channel 層級評估
+
+針對某個 channel scope 權限：
+
+先從 space 角色計算基礎權限。
+
+載入呼叫者在目標 channel 上所有有效角色的覆寫。
+
+套用覆寫優先順序：
+
+任一 deny 優先。
+
+否則任一 allow 優先。
+
+否則結果繼承 base space permission。
+
+特殊規則
+
+owner 必須鎖定，且不能移除其關鍵權限。
+
+owner 不可被 channel 層級的 deny 覆寫。
+
+系統必須強制每個 space 至少有一位 owner。
+
+API 範圍
+
+新 API 應圍繞管理流程與執行期授權檢查來設計。
+
+Members
+
+GET /api/spaces/:spaceId/members
+
+POST /api/spaces/:spaceId/members/invite
+
+POST /api/spaces/:spaceId/role-bindings
+
+DELETE /api/spaces/:spaceId/role-bindings/:bindingId
+
+GET /api/spaces/:spaceId/departments
+
+Roles And Permissions
+
+GET /api/spaces/:spaceId/roles
+
+POST /api/spaces/:spaceId/roles
+
+PATCH /api/spaces/:spaceId/roles/:roleId
+
+DELETE /api/spaces/:spaceId/roles/:roleId
+
+GET /api/spaces/:spaceId/permissions
+
+PUT /api/spaces/:spaceId/roles/:roleId/permissions
+
+Channels
+
+GET /api/spaces/:spaceId/channels
+
+GET /api/spaces/:spaceId/channels/:channelId/overrides
+
+PUT /api/spaces/:spaceId/channels/:channelId/overrides
+
+POST /api/spaces/:spaceId/channels/:channelId/copy-overrides
+
+Authorization
+
+POST /api/authz/check
+
+POST /api/authz/check-batch
+
+GET /api/authz/me
+
+Audit Log
+
+GET /api/spaces/:spaceId/audit-logs
+
+GET /api/spaces/:spaceId/audit-logs/export
+
+Admin UI
+
+管理介面應提供與截圖對應的五個分頁：
+
+Members
+使用者與部門成員關係，以及直接／繼承的角色綁定。
+
+Roles
+內建與自訂角色，包含摘要卡片與能力重點。
+
+Permissions
+每個角色的 space 層級權限矩陣。
+
+Channels
+使用 inherit / allow / deny 的 channel 層級覆寫矩陣。
+
+Audit Log
+可搜尋的事件歷史，支援類別篩選與匯出。
+
+技術建議
+Backend
+
+Go
+
+Echo
+
+MongoDB
+
+這可讓實作技術棧維持熟悉，同時採用新的模型，不受目前服務 policy 格式限制。
+
+Frontend
+
+建議建立專用的管理 UI，可以是：
+
+內嵌在新網站的管理區中，或
+
+獨立建成一個管理後台應用程式
+
+前端應使用針對矩陣編輯設計的 view model，而不是直接使用底層持久化物件。
+
+交付策略
+
+建議的上線階段如下：
+
+基礎 space 角色與執行期授權檢查
+
+自訂角色與權限矩陣 UI
+
+Channel 覆寫
+
+Audit log 與匯出
+
+這樣的順序可先讓基礎 RBAC 層穩定，再隔離風險最高的 evaluator 工作。
+
+測試策略
+
+測試必須聚焦在 evaluator 與管理流程：
+
+權限解析與覆寫優先順序的單元測試
+
+綁定、覆寫與稽核篩選的 repository 測試
+
+管理端點與執行期 authz 端點的 API 測試
+
+矩陣編輯與覆寫行為的 UI 整合測試
+
+最終決策
+
+建立一個新的授權平台，而不是修改 rbac7。
+
+此設計可直接支援：
+
+自訂角色
+
+以部門為基礎的角色繼承
+
+Channel 層級三態覆寫
+
+面向管理端的權限矩陣
+
+通用化的稽核日誌
